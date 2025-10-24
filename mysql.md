@@ -27,3 +27,10 @@
 * 分库分表：数据量极大时，考虑水平分表（如按用户 ID）或分库。
 * 监控与测试 性能监控：使用工具如 MySQL Workbench、Percona Toolkit 或 Zabbix 监控查询性能。
 * 压力测试：用 sysbench 或 mysqlslap 测试优化后的查询性能。
+
+### mysql有四种隔离级别
+* READ UNCOMMITTED（读未提交）: 该隔离级别的事务会读到其它未提交事务的数据，此现象也称之为脏读。
+* READ COMMITTED（读已提交）: 一个事务可以读取另一个已提交的事务，多次读取会造成不一样的结果，此现象称为不可重复读问题，Oracle 和 SQL Server 的默认隔离级别。
+* REPEATABLE READ（可重复读）: 该隔离级别是 MySQL 默认的隔离级别，在同一个事务里，select 的结果是事务开始时时间点的状态，因此，同样的 select 操作读到的结果会是一致的，但是，会有幻读现象
+* SERIALIZABLE（串行化）: 在该隔离级别下事务都是串行顺序执行的，MySQL 数据库的 InnoDB 引擎会给读操作隐式加一把读共享锁，从而避免了脏读、不可重读复读和幻读问题。
+
