@@ -72,3 +72,62 @@ MySQL（特别是 InnoDB 引擎）选择 B+树作为索引结构的理由如下�
 B 树：非叶子节点存储数据，导致扇出较低，树高度较高，且范围查询效率不如 B+树（无链表结构）。
 哈希索引：适合精确查找（O(1)），但不支持范围查询和排序，适用场景有限（MySQL 的 Memory 引擎支持哈希索引）。
 ```
+
+### mysql 有哪些索引
+```
+主键索引 (PRIMARY KEY)
+
+每个表只能有一个主键索引，用于唯一标识表中的每一行记录。
+自动具有唯一性约束，不能包含 NULL 值。
+通常在创建表时定义，例如 PRIMARY KEY (column_name)。
+底层通常使用 B+树实现。
+
+
+唯一索引 (UNIQUE INDEX)
+
+确保索引列中的值是唯一的，允许 NULL 值（但 NULL 值本身可以重复，视 MySQL 版本而定）。
+用于强制数据唯一性，例如邮箱地址或身份证号。
+示例：CREATE UNIQUE INDEX idx_name ON table_name (column_name);
+
+
+普通索引 (INDEX/KEY)
+
+最基本的索引类型，用于加速查询，无唯一性约束。
+允许重复值和 NULL 值。
+示例：CREATE INDEX idx_name ON table_name (column_name);
+
+
+全文索引 (FULLTEXT INDEX)
+
+专门用于文本搜索，适用于 CHAR、VARCHAR 或 TEXT 类型的列。
+常用于全文搜索场景，例如模糊查询（MATCH ... AGAINST 语法）。
+仅在 MyISAM 和 InnoDB（MySQL 5.6 及以上版本）存储引擎中支持。
+示例：CREATE FULLTEXT INDEX idx_fulltext ON table_name (column_name);
+
+
+空间索引 (SPATIAL INDEX)
+
+用于空间数据类型（如 GEOMETRY、POINT、LINESTRING 等），仅在 MyISAM 和部分 InnoDB 版本中支持。
+常用于地理信息系统（GIS）相关查询。
+示例：CREATE SPATIAL INDEX idx_spatial ON table_name (column_name);
+
+
+组合索引 (Composite/Multi-column Index)
+
+基于多个列创建的索引，适合多列条件查询。
+遵循“最左前缀原则”，即查询条件需包含索引的最左列才能有效利用。
+示例：CREATE INDEX idx_composite ON table_name (column1, column2);
+
+
+前缀索引 (Prefix Index)
+
+针对较长的字符串列（如 VARCHAR 或 TEXT），只对列的前 N 个字符创建索引，节省存储空间。
+示例：CREATE INDEX idx_prefix ON table_name (column_name(10));
+
+
+覆盖索引 (Covering Index)
+
+一种逻辑概念而非具体索引类型，指索引包含查询所需的所有列数据，查询无需访问表数据。
+常用于优化 SELECT 查询性能。
+例如：查询仅涉及索引列，MySQL 可直接从索引中获取数据。
+```
