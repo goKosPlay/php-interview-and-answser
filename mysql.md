@@ -300,3 +300,254 @@ ORDER BY id;
 * 数据一致性必须靠数据库约束兜底：唯一索引能从根源避免并发下重复写。
 * 应用层校验只能提升体验，不能替代唯一约束（并发会穿透）。
 * 处理冲突：INSERT IGNORE / INSERT ... ON DUPLICATE KEY UPDATE（视业务需求）。
+
+### MySQL 内核与进阶面试题
+
+#### 1. Buffer Pool 的 LRU 算法是如何设计的？（解决全表扫描污染问题）
+* **传统 LRU 问题**：如果全表扫描（如备份或无索引查询），所有热数据会被新数据挤出，导致缓存命中率骤降。
+* **MySQL 改进（冷热分离）**：
+    * 将 LRU 链表分为 **New Sublist（热区，约 63%）** 和 **Old Sublist（冷区，约 37%）**。
+    * 新读入的页默认加入 **Old 区头部**。
+    * 只有在 Old 区停留超过一定时间（`innodb_old_blocks_time`，默认 1s）后被再次访问，才会被移入 New 区。
+    * **效果**：大表扫描产生的临时数据只会在 Old 区流转并快速被淘汰，保护了 New 区的热点数据。
+
+#### 2. 什么是 Change Buffer（写缓冲）？有什么用？
+* **场景**：针对 **非唯一普通索引** 的插入/更新。
+* **原理**：
+    * 如果目标数据页在 Buffer Pool 中，直接更新。
+    * 如果**不在**，且不影响唯一性，则不需立即从磁盘读入该页，而是将修改记录在 Change Buffer 中。
+    * 等待该页被读取（Merge）或后台线程定期 Merge，减少随机磁盘读 I/O。
+* **限制**：仅适用于非唯一索引（唯一索引必须读入页来校验唯一性）。
+* **适用**：写多读少、索引多的业务。
+
+#### 3. Double Write Buffer（双写缓冲）解决了什么问题？
+* **问题（页断裂/Partial Page Write）**：InnoDB 页大小默认 16KB，文件系统（OS）页通常 4KB。极端宕机时，可能只写了前 4KB，导致页损坏，Redo Log 无法恢复（Redo Log 记录的是物理变更，依赖页结构完整）。
+* **机制**：
+    1. 脏页刷盘时，先 `memcpy` 到内存中的 Double Write Buffer。
+    2. 顺序写入系统表空间的 Double Write 区域（磁盘，分两次写，每次 1MB）。
+    3. `fsync` 确保落盘。
+    4. 最后离散写入对应的数据文件。
+* **恢复**：若发现页损坏，从 Double Write 区域找到完整的副本覆盖，再重放 Redo Log。
+
+#### 4. 什么是自适应哈希索引（Adaptive Hash Index, AHI）？
+* InnoDB 会监控索引搜索，如果发现某些热点页频繁被访问，会自动建立哈希索引（在内存中）。
+* **优点**：将 B+树的 O(Depth) 查找降为 O(1)。
+* **缺点**：维护哈希表有锁开销，高并发写场景下可能成为瓶颈（可关闭 `innodb_adaptive_hash_index`）。
+
+#### 5. Online DDL 的原理是什么？（为什么加字段不再锁表？）
+* **MySQL 5.6 之前**：Copy Table（新建临时表->复制数据->重命名），期间锁全表写。
+* **In-Place 方式（5.6+）**：
+    * **Prepare 阶段**：持有元数据锁（MDL）排他锁，极短。
+    * **Execute 阶段**：降级为 MDL 共享锁（允许 DML 读写）。不仅修改数据字典，还会记录 DDL 期间产生的 DML 操作日志（Row Log）。
+    * **Commit 阶段**：升级 MDL 排他锁，重放 Row Log，确保数据一致。
+
+#### 6. 自增主键为什么可能不连续？
+* **事务回滚**：申请的 ID 不会退还。
+* **唯一键冲突**：插入报错，ID 已消耗。
+* **批量插入优化**：InnoDB 为批量插入预申请 ID（可能有空洞）。
+* **重启（8.0 之前）**：自增计数器存内存，重启后取 `max(id)+1`，如果之前删除了最大记录，重启后 ID 可能回溯（8.0 修复，存 redo log）。
+
+#### 7. MySQL 8.0 有哪些重要新特性？
+* **原子 DDL**：DDL 操作（如 `DROP TABLE`）要么全成功要么全回滚，不再有残留文件。
+* **窗口函数 (Window Functions)**：`RANK()`, `ROW_NUMBER()` 等，方便复杂统计。
+* **公用表表达式 (CTE)**：`WITH recursive_cte AS (...)`，支持递归查询（如树形结构）。
+* **不可见索引 (Invisible Indexes)**：软删除索引，用于测试删除索引对性能的影响。
+
+
+### MySQL 面试题库大全 (补充精选)
+
+#### 1. 基础与数据类型
+1.  **MySQL 的默认端口号是多少？** 3306。
+2.  **MyISAM 和 InnoDB 的主要区别？**
+    *   InnoDB：支持事务、行级锁、外键、崩溃恢复、聚簇索引。
+    *   MyISAM：不支持事务、表级锁、全文索引（早期）、读取快、无崩溃恢复。
+3.  **CHAR 和 VARCHAR 的区别？**
+    *   CHAR：定长，不足补空格，查询快，适合短且固定长度（如身份证、MD5）。
+    *   VARCHAR：变长，存储实际长度+长度前缀，节省空间。
+4.  **TEXT 和 BLOB 的区别？**
+    *   TEXT：存储字符数据，不区分大小写（依赖校对集）。
+    *   BLOB：存储二进制数据，区分大小写。
+5.  **DATETIME 和 TIMESTAMP 的区别？**
+    *   DATETIME：8 字节，与时区无关，范围 1000-9999 年。
+    *   TIMESTAMP：4 字节，随时区变化，范围 1970-2038 年。
+6.  **DECIMAL 和 FLOAT/DOUBLE 的区别？**
+    *   DECIMAL：定点数，精确存储，适合金额。
+    *   FLOAT/DOUBLE：浮点数，有精度损失。
+7.  **NULL 和空字符串的区别？**
+    *   NULL：占用额外空间标记，不参与 count() 统计，索引效率略低。
+    *   空字符串：长度为 0，不占标记空间。
+8.  **`int(11)` 中的 11 代表什么？** 显示宽度，不影响存储大小（int 始终 4 字节）。
+9.  **MySQL 里面的 `ENUM` 类型有什么优缺点？**
+    *   优：节省空间（内部存整数）。
+    *   缺：修改枚举值需要 DDL 锁表，排序按整数索引而非字符串。
+10. **`DELETE`, `TRUNCATE`, `DROP` 的区别？**
+    *   DELETE：DML，逐行删除，可回滚，慢。
+    *   TRUNCATE：DDL，清空表，重置自增 ID，不可回滚，快。
+    *   DROP：DDL，删除表结构和数据。
+
+#### 2. 索引与 B+树
+11. **为什么 MySQL 用 B+ 树不用 B 树？**
+    *   B+ 树非叶子节点不存数据，扇出更高，树更矮，I/O 次数更少。
+    *   叶子节点由链表连接，范围查询更优。
+12. **为什么不用 Hash 索引？** Hash 不支持范围查询、排序、模糊匹配，仅支持精确匹配。
+13. **什么是聚簇索引？** 数据存储在主键索引的叶子节点上。
+14. **什么是非聚簇索引（二级索引）？** 叶子节点存储主键值，需回表查询。
+15. **什么是覆盖索引？** 查询的列完全包含在索引中，无需回表。
+16. **最左前缀原则是什么？** 联合索引 `(a,b,c)`，只能利用 `a`, `ab`, `abc`，跳过 `a` 直接用 `b` 无效。
+17. **索引下推（ICP）是什么？** MySQL 5.6+，在存储引擎层利用索引过滤数据，减少回表次数。
+18. **什么情况索引失效？**
+    *   对索引列做运算/函数。
+    *   隐式类型转换（字符串不加引号）。
+    *   `LIKE '%abc'` 前缀模糊。
+    *   `OR` 连接非索引列。
+    *   `!=` 或 `<>`（可能失效，看优化器）。
+19. **如何查看索引使用情况？** `EXPLAIN` 或 `SHOW INDEX FROM table`。
+20. **主键选择自增 ID 还是 UUID？**
+    *   推荐自增 ID：INT/BIGINT 占用小，顺序写入减少页分裂。
+    *   UUID：字符串长（占用大），随机写入导致大量页分裂和磁盘随机 I/O。
+
+#### 3. 事务与锁
+21. **事务 ACID 特性？** 原子性、一致性、隔离性、持久性。
+22. **并发事务带来的问题？** 脏读、不可重复读、幻读。
+23. **MySQL 的四种隔离级别？**
+    *   Read Uncommitted (读未提交)
+    *   Read Committed (RC, 读已提交)
+    *   Repeatable Read (RR, 可重复读, 默认)
+    *   Serializable (串行化)
+24. **InnoDB 如何解决幻读？**
+    *   快照读：MVCC。
+    *   当前读：Next-Key Lock（间隙锁）。
+25. **什么是 MVCC？** 多版本并发控制，通过 Undo Log 实现历史版本读取，避免读写阻塞。
+26. **什么是行锁、表锁、页锁？** InnoDB 支持行锁（开销大，并发高），MyISAM 仅支持表锁。
+27. **共享锁（S）与排他锁（X）？**
+    *   S 锁：读锁，允许其他事务读，阻止写。
+    *   X 锁：写锁，阻止其他事务读写。
+28. **意向锁（IS/IX）的作用？** 表级锁，用于快速判断表中是否有行锁，避免遍历检查。
+29. **什么是死锁？如何解决？**
+    *   两个事务互相等待对方持有的锁。
+    *   解决：设置超时、开启死锁检测（自动回滚小事务）、固定顺序访问资源。
+30. **`SELECT ... FOR UPDATE` 是什么锁？** 排他锁（X 锁）。
+
+#### 4. 日志系统 (Logs)
+31. **Redo Log（重做日志）的作用？** 保证持久性（Crash Safe），物理日志，记录页的修改。循环写。
+32. **Undo Log（回滚日志）的作用？** 保证原子性和 MVCC，逻辑日志，记录反向操作。
+33. **Binlog（归档日志）的作用？** 主从复制、数据恢复。逻辑日志，追加写。
+34. **Redo Log 和 Binlog 的区别？**
+    *   Redo：InnoDB 层，物理日志，循环写，用于恢复。
+    *   Binlog：Server 层，逻辑日志，追加写，用于复制。
+35. **什么是两阶段提交（2PC）？** 保证 Redo Log 和 Binlog 的一致性。Prepare -> 写 Binlog -> Commit。
+36. **Binlog 的格式？**
+    *   Statement：记录 SQL（少，可能有不一致）。
+    *   Row：记录行变更（多，安全）。
+    *   Mixed：混合模式。
+37. **Relay Log（中继日志）的作用？** 从库 I/O 线程读取主库 Binlog 写入 Relay Log，SQL 线程读取执行。
+38. **Slow Query Log（慢查询日志）？** 记录执行时间超过 `long_query_time` 的 SQL。
+39. **General Log？** 记录所有 SQL，一般关闭。
+40. **Error Log？** 记录启动、运行错误。
+
+#### 5. 性能优化
+41. **SQL 优化的一般步骤？**
+    *   看慢日志。
+    *   `EXPLAIN` 分析执行计划。
+    *   优化索引、改写 SQL。
+42. **`EXPLAIN` 关键字段？**
+    *   `type`：system > const > eq_ref > ref > range > index > ALL。
+    *   `key`：实际用到的索引。
+    *   `rows`：扫描行数。
+    *   `Extra`：Using filesort (需优化), Using temporary (需优化), Using index (好)。
+43. **如何优化 `LIMIT 1000000, 10`？**
+    *   子查询 ID：`SELECT * FROM t WHERE id >= (SELECT id FROM t LIMIT 1000000, 1) LIMIT 10`。
+    *   `JOIN` 延迟关联。
+44. **如何优化 `COUNT(*)`？**
+    *   MyISAM 自带计数器快。
+    *   InnoDB 需扫描，可用 Redis 缓存计数或近似值 (`SHOW TABLE STATUS`)。
+45. **如何优化 `ORDER BY`？** 尽量利用索引排序，避免 `Using filesort`。
+46. **如何优化 `GROUP BY`？** 默认会排序，若无需排序加 `ORDER BY NULL`。
+47. **大表如何加索引？** 
+    *   业务低峰期。
+    *   使用 `pt-online-schema-change` 或 `gh-ost`。
+    *   MySQL 5.6+ 支持 Online DDL。
+48. **`JOIN` 优化？** 小表驱动大表，连接字段加索引。
+49. **`IN` 和 `EXISTS` 的区别？**
+    *   `IN`：适合子查询表小。
+    *   `EXISTS`：适合外表小。
+50. **垂直拆分和水平拆分？**
+    *   垂直：按列拆分（大字段独立）。
+    *   水平：按行拆分（分库分表）。
+
+#### 6. 架构与高可用
+51. **MySQL 主从复制原理？**
+    *   主库写 Binlog。
+    *   从库 I/O 线程拉取 Binlog 写入 Relay Log。
+    *   从库 SQL 线程重放 Relay Log。
+52. **主从延迟的原因及解决？**
+    *   原因：从库单线程（5.6 前）、大事务、网络延迟。
+    *   解决：升级 MySQL（MTS 多线程复制）、拆分大事务、半同步复制。
+53. **GTID 是什么？** 全局事务 ID，简化主从切换和故障恢复。
+54. **什么是半同步复制？** 主库等待至少一个从库接收 Binlog 后才返回 Commit 成功。
+55. **常见的 MySQL 高可用方案？**
+    *   MHA (Master High Availability)。
+    *   MGR (MySQL Group Replication)。
+    *   Orchestrator。
+    *   PXC (Percona XtraDB Cluster)。
+56. **读写分离的实现？** ShardingSphere, MyCat, MySQL Router, 代码层封装。
+57. **分库分表带来的问题？** 分布式事务、跨库 JOIN、跨库排序分页、全局 ID。
+58. **如何生成全局唯一 ID？**
+    *   Snowflake 算法。
+    *   UUID。
+    *   Redis 自增。
+    *   数据库号段模式。
+59. **MySQL 8.0 新特性？** 窗口函数、CTE、原子 DDL、JSON 增强、降序索引。
+60. **Buffer Pool 也就是缓冲池，作用？** 缓存数据页和索引页，减少磁盘 I/O。
+
+#### 7. 常用命令与运维
+61. **如何连接 MySQL？** `mysql -u user -p -h host`。
+62. **如何备份数据库？** `mysqldump`。
+63. **如何导入数据？** `source file.sql` 或 `mysql < file.sql`。
+64. **查看当前连接？** `SHOW PROCESSLIST`。
+65. **杀掉连接？** `KILL connection_id`。
+66. **查看变量？** `SHOW VARIABLES LIKE '%xxx%'`。
+67. **查看状态？** `SHOW STATUS LIKE '%xxx%'`。
+68. **查看表结构？** `DESC table_name` 或 `SHOW CREATE TABLE table_name`。
+69. **修改密码？** `ALTER USER 'root'@'localhost' IDENTIFIED BY 'new_pass'`。
+70. **授权用户？** `GRANT ALL PRIVILEGES ON db.* TO 'user'@'%'`。
+
+#### 8. 进阶与坑
+71. **自增主键用完了怎么办？** 改用 BIGINT，若 BIGINT 也能用完（几乎不可能）。
+72. **为什么 `SELECT *` 不好？** 无法覆盖索引，增加网络传输，解析开销大。
+73. **MySQL 默认隔离级别？** RR（可重复读）。Oracle 是 RC。
+74. **什么是幻读？** 同一事务两次查询，结果集条数不一致（多了或少了）。
+75. **Gap Lock（间隙锁）的作用？** 防止插入，解决幻读。
+76. **什么情况会死锁？** 逆序更新、间隙锁冲突。
+77. **Online DDL 的原理？** `In-Place` 模式，不锁表，通过 Row Log 记录 DDL 期间的 DML。
+78. **Change Buffer 适用场景？** 写多读少，非唯一索引。
+79. **Double Write 的作用？** 防止页断裂（Partial Page Write）。
+80. **AHI (自适应哈希索引)？** 监控热点页自动建立哈希索引。
+
+#### 9. SQL 语句专项
+81. **去重查询？** `DISTINCT`。
+82. **模糊查询？** `LIKE`。
+83. **排序？** `ORDER BY`。
+84. **分组？** `GROUP BY`。
+85. **分组后过滤？** `HAVING`。
+86. **连接查询有哪些？** `INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, `FULL JOIN` (MySQL 不支持，用 UNION)。
+87. **子查询分类？** 标量子查询、列子查询、行子查询、表子查询。
+88. **`UNION` 和 `UNION ALL`？** `UNION` 去重（慢），`UNION ALL` 不去重（快）。
+89. **插入或更新？** `INSERT INTO ... ON DUPLICATE KEY UPDATE`。
+90. **替换插入？** `REPLACE INTO` (先删后插)。
+
+#### 10. 综合考察
+91. **一条 SQL 执行很慢的原因？**
+    *   偶尔慢：锁等待、Redo Log 刷盘。
+    *   一直慢：没索引、索引失效、数据量太大。
+92. **MySQL 大表数据归档策略？** `pt-archiver`，按时间分批导出删除。
+93. **如何清洗数据？** 存储过程或脚本。
+94. **MySQL 占用 CPU 过高怎么排查？** `top` 定位，`show processlist` 找慢 SQL。
+95. **MySQL 内存占用过高？** 检查 `innodb_buffer_pool_size` 及线程 buffer。
+96. **如何彻底删除 MySQL？** `yum remove` 或 `apt remove` 并清理数据目录 /var/lib/mysql。
+97. **MySQL 5.7 和 8.0 区别？** 8.0 性能更好，NoSQL 支持，窗口函数，默认字符集 utf8mb4。
+98. **UTF-8 和 UTF8MB4？** UTF-8 是 MySQL 的阉割版（3 字节），UTF8MB4 是完整版（4 字节，支持 Emoji）。
+99. **MySQL 是行式存储还是列式存储？** 行式存储（InnoDB/MyISAM）。列式存储如 ClickHouse。
+100. **如何实现乐观锁？** 增加 `version` 字段，更新时 `WHERE version = old_version`。
+
+
