@@ -21,8 +21,8 @@
         Daemon -- No --> MasterRunning
         
         subgraph MasterProcess [Master 进程]
-            MasterRunning --> CreateSocket[创建监听 Socket]
-            CreateSocket --> ForkWorkers[Fork Worker 进程]
+            MasterRunning --> CreateSockets["创建监听 Socket (Stream Socket Server)"]
+            CreateSockets --> ForkWorkers[Fork Worker 进程]
             ForkWorkers --> MasterLoop[Master 监控循环]
             MasterLoop -- 收到 SIGCHLD --> ReloadWorker[回收 & 重启 Worker]
             ReloadWorker --> ForkWorkers
@@ -33,9 +33,9 @@
         
         subgraph WorkerProcess [Worker 进程]
             WorkerStart[Worker 启动] --> UserSetup[降权 / 设置用户]
-            UserSetup --> CallWorkerStart[回调 onWorkerStart]
-            CallWorkerStart --> AddEvent[添加 Socket 到 EventLoop]
-            AddEvent --> Loop{Event Loop 监听事件}
+            UserSetup --> AddEvent[注册监听事件到 EventLoop]
+            AddEvent --> CallWorkerStart[回调 onWorkerStart]
+            CallWorkerStart --> Loop{Event Loop 监听事件}
             
             Loop -- 监听端口可读 --> Accept[Accept 建立连接]
             Accept --> OnConnect[回调 onConnect]
